@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "esModuleInterop": true,
+    "target": "es6",
+    "moduleResolution": "node",
+    "sourceMap": true,
+    "outDir": "JSconversion",
+    "rootDir": "src"
+  },
+  "lib": ["es2015"]
+}
+
+// {
+//   "compilerOptions": {
+//     "target": "es6",
+//     "module": "commonjs",
+//     "moduleResolution": "node",
+//     "esModuleInterop": true,
+//     "strict": true, // ✅ this enables strict type checking
+//     "outDir": "JSconversion",
+//     "rootDir": "src",
+//     "sourceMap": true,
+//     "baseUrl": "./",
+//     "resolveJsonModule": true
+//   },
+//   "include": ["src"],
+//   "exclude": ["node_modules"],
+//   "lib": ["es2015"]
+// }
+
+
+
