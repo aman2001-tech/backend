@@ -67,12 +67,16 @@ app.use((0, express_session_1.default)({
     saveUninitialized: false,
     store: store,
 }));
-// --- Schemas
 const RegistrationSchema = new mongoose_1.Schema({
-    registration_id: String,
+    registration_id: { type: String, unique: true },
     email: String,
     employee_name: String,
     course_id: String,
+    status: {
+        type: String,
+        enum: ['PENDING', 'ACCEPTED', 'CANCELLED'],
+        default: 'PENDING',
+    },
 });
 const CourseSchema = new mongoose_1.Schema({
     course_id: { type: String, unique: true },
@@ -81,20 +85,27 @@ const CourseSchema = new mongoose_1.Schema({
     start_date: String,
     min_employees: Number,
     max_employees: Number,
-    registered: [RegistrationSchema],
-    allotted: Boolean,
+    registered: [{ type: mongoose_1.Schema.Types.ObjectId, ref: 'Registration' }],
+    status: {
+        type: String,
+        enum: ['PENDING', 'ALLOTTED', 'CANCELLED'],
+        default: 'PENDING',
+    },
 });
-const RegistrationSchemaFull = new mongoose_1.Schema({
-    registration_id: { type: String, unique: true },
-    email: String,
-    employee_name: String,
-    course_id: String,
-});
-// --- Models
 const Course = mongoose_1.default.model('Course', CourseSchema);
-const Registration = mongoose_1.default.model('Registration', RegistrationSchemaFull);
-// --- Routes
-// Add course
+const Registration = mongoose_1.default.model('Registration', RegistrationSchema);
+function isValidDDMMYY(dateStr) {
+    if (!/^\d{6}$/.test(dateStr))
+        return false;
+    const day = parseInt(dateStr.substring(0, 2));
+    const month = parseInt(dateStr.substring(2, 4));
+    const year = parseInt(dateStr.substring(4, 6));
+    const fullYear = 2000 + year;
+    const date = new Date(fullYear, month - 1, day);
+    return (date.getFullYear() === fullYear &&
+        date.getMonth() === month - 1 &&
+        date.getDate() === day);
+}
 app.post('/add/courseOffering', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const { course_name, instructor_name, start_date, min_employees, max_employees, } = req.body;
     if (!course_name ||
@@ -102,7 +113,54 @@ app.post('/add/courseOffering', (req, res) => __awaiter(void 0, void 0, void 0, 
         !start_date ||
         typeof min_employees !== 'number' ||
         typeof max_employees !== 'number') {
-        return res.status(400).json({ message: 'Invalid or missing fields' });
+        return res.status(400).json({
+            status: 400,
+            message: 'INPUT_VALIDATION_ERROR',
+            data: {
+                failure: {
+                    Message: 'Missing required fields or invalid number format.',
+                },
+            },
+        });
+    }
+    if (max_employees < min_employees) {
+        return res.status(400).json({
+            status: 400,
+            message: 'INPUT_VALIDATION_ERROR',
+            data: {
+                failure: {
+                    Message: 'max_employees must be >= min_employees.',
+                },
+            },
+        });
+    }
+    if (!isValidDDMMYY(start_date)) {
+        return res.status(400).json({
+            status: 400,
+            message: 'INPUT_VALIDATION_ERROR',
+            data: {
+                failure: {
+                    Message: 'start_date must be a valid date in ddmmyy format.',
+                },
+            },
+        });
+    }
+    const day = parseInt(start_date.substring(0, 2));
+    const month = parseInt(start_date.substring(2, 4));
+    const year = 2000 + parseInt(start_date.substring(4, 6));
+    const courseStartDate = new Date(year, month - 1, day);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (courseStartDate < today) {
+        return res.status(400).json({
+            status: 400,
+            message: 'INPUT_VALIDATION_ERROR',
+            data: {
+                failure: {
+                    Message: 'start_date cannot be in the past.',
+                },
+            },
+        });
     }
     const course_id = `OFFERING-${course_name}-${instructor_name}`;
     try {
@@ -122,7 +180,7 @@ app.post('/add/courseOffering', (req, res) => __awaiter(void 0, void 0, void 0, 
             min_employees,
             max_employees,
             registered: [],
-            allotted: false,
+            status: 'PENDING',
         });
         yield course.save();
         return res.status(200).json({
@@ -135,7 +193,6 @@ app.post('/add/courseOffering', (req, res) => __awaiter(void 0, void 0, void 0, 
         return res.status(500).json({ error: 'Internal server error' });
     }
 }));
-// Register employee to course
 app.post('/add/register/:course_id', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const { email, employee_name } = req.body;
     const course_id = req.params.course_id;
@@ -144,12 +201,14 @@ app.post('/add/register/:course_id', (req, res) => __awaiter(void 0, void 0, voi
             status: 400,
             message: 'INPUT_DATA_ERROR',
             data: {
-                failure: { Message: 'email, employee_name and course_id are required' },
+                failure: {
+                    Message: 'email, employee_name and course_id are required',
+                },
             },
         });
     }
     try {
-        const course = yield Course.findOne({ course_id });
+        const course = yield Course.findOne({ course_id }).populate('registered');
         if (!course) {
             return res.status(400).json({
                 status: 400,
@@ -164,7 +223,8 @@ app.post('/add/register/:course_id', (req, res) => __awaiter(void 0, void 0, voi
                 data: { failure: { Message: 'Registration is full' } },
             });
         }
-        if (course.registered.some((r) => r.email === email)) {
+        const alreadyRegistered = yield Registration.findOne({ course_id, email });
+        if (alreadyRegistered) {
             return res.status(400).json({
                 status: 400,
                 message: 'ALREADY_REGISTERED',
@@ -172,33 +232,30 @@ app.post('/add/register/:course_id', (req, res) => __awaiter(void 0, void 0, voi
             });
         }
         const registration_id = `${employee_name}-${course.course_id}`;
-        const registration = {
+        const regDoc = new Registration({
             registration_id,
             email,
             employee_name,
             course_id,
-        };
-        course.registered.push(registration);
-        yield course.save();
-        const regDoc = new Registration(registration);
+            status: 'PENDING',
+        });
         yield regDoc.save();
+        course.registered.push(regDoc._id);
+        yield course.save();
         return res.status(200).json({
             status: 200,
             message: `successfully registered for ${course_id}`,
-            data: { success: { registration_id, status: 'ACCEPTED' } },
+            data: { success: { registration_id, status: 'PENDING' } },
         });
     }
     catch (err) {
         return res.status(500).json({ error: 'Internal server error' });
     }
 }));
-// Allot course
 app.post('/allot/:course_id', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const course_id = req.params.course_id;
-    console.log('Course ID from URL:', course_id);
     try {
-        const course = yield Course.findOne({ course_id });
-        console.log("Course found", course);
+        const course = yield Course.findOne({ course_id }).populate('registered');
         if (!course) {
             return res.status(400).json({
                 status: 400,
@@ -206,29 +263,50 @@ app.post('/allot/:course_id', (req, res) => __awaiter(void 0, void 0, void 0, fu
                 data: { failure: { Message: 'Course not found' } },
             });
         }
+        const day = parseInt(course.start_date.substring(0, 2));
+        const month = parseInt(course.start_date.substring(2, 4));
+        const year = 2000 + parseInt(course.start_date.substring(4, 6));
+        const courseStartDate = new Date(year, month - 1, day);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (courseStartDate < today) {
+            return res.status(400).json({
+                status: 400,
+                message: 'COURSE_EXPIRED',
+                data: {
+                    failure: {
+                        Message: 'Cannot allot a course that starts in the past.',
+                    },
+                },
+            });
+        }
         const isEnough = course.registered.length >= course.min_employees;
-        const allotments = course.registered.map((emp) => ({
+        const newStatus = isEnough ? 'ACCEPTED' : 'CANCELLED';
+        yield Promise.all(course.registered.map((reg) => __awaiter(void 0, void 0, void 0, function* () {
+            reg.status = newStatus;
+            yield reg.save();
+        })));
+        course.status = isEnough ? 'ALLOTTED' : 'CANCELLED';
+        yield course.save();
+        const allotments = course.registered
+            .map((emp) => ({
             registration_id: emp.registration_id,
             email: emp.email,
             course_name: course.course_name,
             course_id: course.course_id,
-            status: isEnough ? 'ACCEPTED' : 'COURSE_CANCELED',
-        }));
-        course.allotted = true;
-        yield course.save();
+            status: emp.status,
+        }))
+            .sort((a, b) => a.registration_id.localeCompare(b.registration_id));
         return res.status(200).json({
             status: 200,
-            message: 'successfully allotted course to registered employees',
-            data: {
-                success: allotments.sort((a, b) => a.registration_id.localeCompare(b.registration_id)),
-            },
+            message: 'Successfully allotted course to registered employees',
+            data: { success: allotments },
         });
     }
     catch (err) {
         return res.status(500).json({ error: 'Internal server error' });
     }
 }));
-// Cancel registration
 app.post('/cancel/:registration_id', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const registration_id = req.params.registration_id;
     try {
@@ -248,20 +326,7 @@ app.post('/cancel/:registration_id', (req, res) => __awaiter(void 0, void 0, voi
                 data: { failure: { Message: 'Course not found' } },
             });
         }
-        if (course.allotted) {
-            return res.status(200).json({
-                status: 200,
-                message: 'Cancel registration unsuccessful',
-                data: {
-                    success: {
-                        registration_id,
-                        course_id: course.course_id,
-                        status: 'CANCEL_REJECTED',
-                    },
-                },
-            });
-        }
-        course.registered = course.registered.filter((r) => r.registration_id !== registration_id);
+        course.registered = course.registered.filter((id) => id.toString() !== registration._id.toString());
         yield course.save();
         yield Registration.deleteOne({ registration_id });
         return res.status(200).json({
@@ -280,7 +345,6 @@ app.post('/cancel/:registration_id', (req, res) => __awaiter(void 0, void 0, voi
         return res.status(500).json({ error: 'Internal server error' });
     }
 }));
-// --- MongoDB Connection and App Start
 mongoose_1.default
     .connect(MONGODB_URI)
     .then(() => {
